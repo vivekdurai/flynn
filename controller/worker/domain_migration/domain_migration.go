@@ -97,6 +97,7 @@ func (m *migration) Run() error {
 	// Generate TLS Cert if not already present
 	var cert *tlscert.Cert
 	if dm.TLSCert == nil {
+		log.Info("generating TLS cert")
 		var err error
 		cert, err = m.generateTLSCert()
 		if err != nil {
@@ -107,24 +108,28 @@ func (m *migration) Run() error {
 		dm.TLSCert = cert
 	}
 
+	log.Info("deploying controller")
 	if err := m.maybeDeployController(); err != nil {
 		log.Error("error deploying controller", "err", err)
 		m.createEvent(err)
 		return err
 	}
 
+	log.Info("deploying router")
 	if err := m.maybeDeployRouter(); err != nil {
 		log.Error("error deploying router", "err", err)
 		m.createEvent(err)
 		return err
 	}
 
+	log.Info("deploying dashboard")
 	if err := m.maybeDeployDashboard(); err != nil {
 		log.Error("error deploying dashboard", "err", err)
 		m.createEvent(err)
 		return err
 	}
 
+	log.Info("creating missing routes")
 	if err := m.createMissingRoutes(); err != nil {
 		log.Error("error creating missing routes", "err", err)
 		m.createEvent(err)
@@ -350,7 +355,7 @@ func (m *migration) createMissingRoutes() error {
 
 	errChan := make(chan error, len(apps))
 	createMissingRoutes := func(app *ct.App) {
-		errChan <- m.appCreateMissingRoutes(app.ID, appRoutes[app.ID])
+		errChan <- m.appCreateMissingRoutes(app, appRoutes[app.ID])
 	}
 	for _, app := range apps {
 		go createMissingRoutes(app)
@@ -364,7 +369,7 @@ func (m *migration) createMissingRoutes() error {
 	return returnErr
 }
 
-func (m *migration) appCreateMissingRoutes(appID string, routes []*router.Route) error {
+func (m *migration) appCreateMissingRoutes(app *ct.App, routes []*router.Route) error {
 	if routes == nil {
 		// There are no routes for this app
 		return nil
@@ -375,7 +380,7 @@ func (m *migration) appCreateMissingRoutes(appID string, routes []*router.Route)
 			continue
 		}
 		if strings.HasSuffix(route.Domain, m.dm.OldDomain) {
-			if err := m.appMaybeCreateRoute(appID, route, routes); err != nil {
+			if err := m.appMaybeCreateRoute(app, route, routes); err != nil {
 				return err
 			}
 		}
@@ -384,7 +389,7 @@ func (m *migration) appCreateMissingRoutes(appID string, routes []*router.Route)
 	return nil
 }
 
-func (m *migration) appMaybeCreateRoute(appID string, oldRoute *router.Route, routes []*router.Route) error {
+func (m *migration) appMaybeCreateRoute(app *ct.App, oldRoute *router.Route, routes []*router.Route) error {
 	prefix := strings.TrimSuffix(oldRoute.Domain, m.dm.OldDomain)
 	for _, route := range routes {
 		if strings.HasPrefix(route.Domain, prefix) && strings.HasSuffix(route.Domain, m.dm.Domain) {
@@ -406,9 +411,14 @@ func (m *migration) appMaybeCreateRoute(appID string, oldRoute *router.Route, ro
 	} else {
 		route.Certificate = oldRoute.Certificate
 	}
-	err := m.client.CreateRoute(appID, route)
-	if err != nil && err.Error() == "conflict: Duplicate route" {
-		return nil
+	log := m.logger.New("app.id", app.ID, "app.name", app.Name, "domain", route.Domain, "service", route.Service)
+	log.Info("creating route")
+	err := m.client.CreateRoute(app.ID, route)
+	if err != nil {
+		log.Error("error creating route", "err", err)
+		if err.Error() == "conflict: Duplicate route" {
+			err = nil
+		}
 	}
 	return err
 }
